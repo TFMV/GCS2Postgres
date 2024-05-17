@@ -5,7 +5,6 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"os"
 
@@ -105,8 +104,7 @@ func FetchColumns(ctx context.Context, pool *pgxpool.Pool, tableName string) ([]
 }
 
 // DataProducer creates an external table in BigQuery and fetches data.
-func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *Config, file File, dataChan chan<- []bigquery.Value, wg *sync.WaitGroup) {
-	defer wg.Done()
+func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *Config, file File, dataChan chan<- []bigquery.Value) {
 	defer close(dataChan)
 
 	// Create an external table in BigQuery for the specified file
@@ -120,10 +118,20 @@ func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *
 		},
 	}
 
-	if err := bigqueryClient.Dataset(config.GCS.Dataset).Table(tableID).Create(ctx, externalTable); err != nil {
-		log.Fatalf("Failed to create external table in BigQuery: %v", err)
+	log.Printf("Creating external table: %s", tableID)
+
+	// Check if the table already exists
+	_, err := bigqueryClient.Dataset(config.GCS.Dataset).Table(tableID).Metadata(ctx)
+	if err == nil {
+		log.Printf("Table %s already exists, skipping creation.", tableID)
+	} else {
+		log.Printf("Creating new table %s.", tableID)
+		if err := bigqueryClient.Dataset(config.GCS.Dataset).Table(tableID).Create(ctx, externalTable); err != nil {
+			log.Fatalf("Failed to create external table in BigQuery: %v", err)
+		}
 	}
 
+	log.Printf("Running query for table: %s", tableID)
 	query := bigqueryClient.Query("SELECT * FROM `" + config.GCS.Dataset + "." + tableID + "`")
 	it, err := query.Read(ctx)
 	if err != nil {
@@ -139,14 +147,14 @@ func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *
 		if err != nil {
 			log.Fatalf("Failed to read row from BigQuery: %v", err)
 		}
+		log.Printf("Read row: %v", row)
 		dataChan <- row
 	}
+	log.Printf("Finished reading data for file: %s", file.Name)
 }
 
 // DataConsumer receives data from a channel and writes it to the target database.
-func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, columns []string, dataChan <-chan []bigquery.Value, wg *sync.WaitGroup) {
-	defer wg.Done()
-
+func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, columns []string, dataChan <-chan []bigquery.Value) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		log.Fatalf("Failed to acquire connection from pool: %v", err)
@@ -160,6 +168,7 @@ func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, col
 			rowInterface[i] = v
 		}
 		rows = append(rows, rowInterface)
+		log.Printf("Appending row: %v", rowInterface)
 	}
 
 	copyCount, err := conn.CopyFrom(
