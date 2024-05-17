@@ -13,4 +13,6 @@ gcs:
   files:
     - name: "regions.parquet"
       table: "regions"
-  concurrent_jobs: 3
+    - name: "supplier.avro"
+      table: "supplier"
+  concurrent_jobs: 1
