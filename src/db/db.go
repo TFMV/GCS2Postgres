@@ -1,59 +1,172 @@
-package main
+package db
 
 import (
 	"context"
 	"log"
+	"path/filepath"
+	"strings"
 	"sync"
 
-	"cloud.google.com/go/bigquery"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/sync/semaphore"
-	"google.golang.org/api/option"
+	"os"
 
-	"github.com/TFMV/GCS2Postgres/src/db"
+	"cloud.google.com/go/bigquery"
+	secretmanager "cloud.google.com/go/secretmanager/apiv1"
+	secretmanagerpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"google.golang.org/api/iterator"
+	"gopkg.in/yaml.v3"
 )
 
-func main() {
+// Config represents the YAML configuration structure
+type Config struct {
+	Postgres struct {
+		Host       string `yaml:"host"`
+		Port       int    `yaml:"port"`
+		User       string `yaml:"user"`
+		DBName     string `yaml:"dbname"`
+		SSLMode    string `yaml:"sslmode"`
+		SecretName string `yaml:"secret_name"`
+		Password   string
+	} `yaml:"postgres"`
+	GCS struct {
+		BucketName     string   `yaml:"bucket_name"`
+		ProjectID      string   `yaml:"project_id"`
+		Dataset        string   `yaml:"dataset"`
+		Files          []string `yaml:"files"`
+		ConcurrentJobs int      `yaml:"concurrent_jobs"`
+	} `yaml:"gcs"`
+}
+
+// LoadConfig loads configuration from a YAML file and retrieves the secret from Secret Manager
+func LoadConfig(filename string) (*Config, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var config Config
+	decoder := yaml.NewDecoder(file)
+	if err := decoder.Decode(&config); err != nil {
+		return nil, err
+	}
+
+	// Retrieve the secret for the Postgres password
 	ctx := context.Background()
-
-	config, err := db.LoadConfig("config.yaml")
+	client, err := secretmanager.NewClient(ctx)
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		return nil, err
+	}
+	defer client.Close()
+
+	accessRequest := &secretmanagerpb.AccessSecretVersionRequest{
+		Name: config.Postgres.SecretName,
 	}
 
-	postgresURL := "postgresql://" + config.Postgres.User + ":" + config.Postgres.Password + "@" + config.Postgres.Host + "/" + config.Postgres.DBName
-
-	pool, err := pgxpool.New(ctx, postgresURL)
+	result, err := client.AccessSecretVersion(ctx, accessRequest)
 	if err != nil {
-		log.Fatalf("Unable to create connection pool: %v", err)
-	}
-	defer pool.Close()
-
-	bigqueryClient, err := bigquery.NewClient(ctx, config.GCS.ProjectID, option.WithCredentialsFile("path/to/credentials.json"))
-	if err != nil {
-		log.Fatalf("Failed to create BigQuery client: %v", err)
+		return nil, err
 	}
 
-	var wg sync.WaitGroup
-	sem := semaphore.NewWeighted(int64(config.GCS.ConcurrentJobs))
+	config.Postgres.Password = string(result.Payload.Data)
 
-	for _, file := range config.GCS.Files {
-		wg.Add(1)
-		dataChan := make(chan []bigquery.Value)
-		if err := sem.Acquire(ctx, 1); err != nil {
-			log.Fatalf("Failed to acquire semaphore: %v", err)
+	return &config, nil
+}
+
+// FetchColumns fetches column names for the given table from the source database.
+func FetchColumns(ctx context.Context, pool *pgxpool.Pool, tableName string) ([]string, error) {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Release()
+
+	rows, err := conn.Query(ctx, "SELECT column_name FROM information_schema.columns WHERE table_name=$1", tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var columns []string
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			return nil, err
 		}
-		go func(file string) {
-			defer sem.Release(1)
-			defer wg.Done()
-			db.DataProducer(ctx, bigqueryClient, config, file, dataChan, &wg)
-			columns, err := db.FetchColumns(ctx, pool, "your_target_table") // Adjust target table as needed
-			if err != nil {
-				log.Fatalf("Failed to fetch columns: %v", err)
-			}
-			db.DataConsumer(ctx, pool, "your_target_table", columns, dataChan, &wg) // Adjust target table as needed
-		}(file)
+		columns = append(columns, column)
 	}
 
-	wg.Wait()
+	return columns, nil
+}
+
+// DataProducer creates an external table in BigQuery and fetches data.
+func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *Config, fileName string, dataChan chan<- []bigquery.Value, wg *sync.WaitGroup) {
+	defer wg.Done()
+	defer close(dataChan)
+
+	// Create an external table in BigQuery for the specified file
+	gcsFilePath := "gs://" + config.GCS.BucketName + "/" + fileName
+	tableID := strings.TrimSuffix(filepath.Base(fileName), filepath.Ext(fileName))
+
+	externalConfig := &bigquery.ExternalDataConfig{
+		SourceFormat: bigquery.DataFormat(strings.ToUpper(filepath.Ext(fileName)[1:])),
+		SourceURIs:   []string{gcsFilePath},
+	}
+
+	tableRef := bigqueryClient.Dataset(config.GCS.Dataset).Table(tableID)
+	if err := tableRef.Create(ctx, &bigquery.TableMetadata{
+		ExternalDataConfig: externalConfig,
+	}); err != nil {
+		log.Fatalf("Failed to create external table in BigQuery: %v", err)
+	}
+
+	query := bigqueryClient.Query("SELECT * FROM `" + config.GCS.Dataset + "." + tableID + "`")
+	it, err := query.Read(ctx)
+	if err != nil {
+		log.Fatalf("Failed to read from BigQuery: %v", err)
+	}
+
+	for {
+		var row []bigquery.Value
+		err := it.Next(&row)
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			log.Fatalf("Failed to read row from BigQuery: %v", err)
+		}
+		dataChan <- row
+	}
+}
+
+// DataConsumer receives data from a channel and writes it to the target database.
+func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, columns []string, dataChan <-chan []bigquery.Value, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		log.Fatalf("Failed to acquire connection from pool: %v", err)
+	}
+	defer conn.Release()
+
+	rows := make([][]interface{}, 0)
+	for row := range dataChan {
+		rowInterface := make([]interface{}, len(row))
+		for i, v := range row {
+			rowInterface[i] = v
+		}
+		rows = append(rows, rowInterface)
+	}
+
+	copyCount, err := conn.CopyFrom(
+		ctx,
+		pgx.Identifier{tableName},
+		columns,
+		pgx.CopyFromRows(rows),
+	)
+	if err != nil {
+		log.Fatalf("Failed to copy data to target database: %v", err)
+	}
+	log.Printf("Copied %d rows to target database from table %s.", copyCount, tableName)
 }
