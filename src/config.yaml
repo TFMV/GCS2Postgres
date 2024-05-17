@@ -1,0 +1,17 @@
+postgres:
+  host: "localhost"
+  port: 5432
+  user: "postgres"
+  dbname: "tfmv"
+  sslmode: "disable"
+  secret_name: "projects/{project_id}/secrets/your_secret_name/versions/latest"
+
+gcs:
+  bucket_name: "your_bucket_name"
+  project_id: "your_gcp_project_id"
+  dataset: "your_bigquery_dataset"
+  files:
+    - "path/to/file1.csv"
+    - "path/to/file2.csv"
+    - "path/to/file3.json"
+  concurrent_jobs: 3
