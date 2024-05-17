@@ -4,14 +4,13 @@ postgres:
   user: "postgres"
   dbname: "tfmv"
   sslmode: "disable"
-  secret_name: "projects/{project_id}/secrets/your_secret_name/versions/latest"
+  secret_name: "projects/858338514445/secrets/postgres-pwd/versions/latest"
 
 gcs:
   bucket_name: "tfmv-gcs-to-pg"
   project_id: "tfmv-371720"
   dataset: "tfmv"
   files:
-    - "path/to/file1.csv"
-    - "path/to/file2.csv"
-    - "path/to/file3.json"
+    - name: "regions.parquet"
+      table: "regions"
   concurrent_jobs: 3

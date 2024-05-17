@@ -27,18 +27,22 @@ type Config struct {
 		DBName     string `yaml:"dbname"`
 		SSLMode    string `yaml:"sslmode"`
 		SecretName string `yaml:"secret_name"`
-		Password   string
 	} `yaml:"postgres"`
 	GCS struct {
-		BucketName     string   `yaml:"bucket_name"`
-		ProjectID      string   `yaml:"project_id"`
-		Dataset        string   `yaml:"dataset"`
-		Files          []string `yaml:"files"`
-		ConcurrentJobs int      `yaml:"concurrent_jobs"`
+		BucketName     string `yaml:"bucket_name"`
+		ProjectID      string `yaml:"project_id"`
+		Dataset        string `yaml:"dataset"`
+		Files          []File `yaml:"files"`
+		ConcurrentJobs int    `yaml:"concurrent_jobs"`
 	} `yaml:"gcs"`
 }
 
-// LoadConfig loads configuration from a YAML file and retrieves the secret from Secret Manager
+type File struct {
+	Name  string `yaml:"name"`
+	Table string `yaml:"table"`
+}
+
+// LoadConfig loads configuration from a YAML file
 func LoadConfig(filename string) (*Config, error) {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -52,26 +56,26 @@ func LoadConfig(filename string) (*Config, error) {
 		return nil, err
 	}
 
-	// Retrieve the secret for the Postgres password
-	ctx := context.Background()
+	return &config, nil
+}
+
+// FetchSecret retrieves the secret value from Google Secret Manager
+func FetchSecret(ctx context.Context, secretName string) (string, error) {
 	client, err := secretmanager.NewClient(ctx)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	defer client.Close()
 
-	accessRequest := &secretmanagerpb.AccessSecretVersionRequest{
-		Name: config.Postgres.SecretName,
+	req := &secretmanagerpb.AccessSecretVersionRequest{
+		Name: secretName,
 	}
-
-	result, err := client.AccessSecretVersion(ctx, accessRequest)
+	result, err := client.AccessSecretVersion(ctx, req)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	config.Postgres.Password = string(result.Payload.Data)
-
-	return &config, nil
+	return string(result.Payload.Data), nil
 }
 
 // FetchColumns fetches column names for the given table from the source database.
@@ -101,23 +105,22 @@ func FetchColumns(ctx context.Context, pool *pgxpool.Pool, tableName string) ([]
 }
 
 // DataProducer creates an external table in BigQuery and fetches data.
-func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *Config, fileName string, dataChan chan<- []bigquery.Value, wg *sync.WaitGroup) {
+func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *Config, file File, dataChan chan<- []bigquery.Value, wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer close(dataChan)
 
 	// Create an external table in BigQuery for the specified file
-	gcsFilePath := "gs://" + config.GCS.BucketName + "/" + fileName
-	tableID := strings.TrimSuffix(filepath.Base(fileName), filepath.Ext(fileName))
+	gcsFilePath := "gs://" + config.GCS.BucketName + "/" + file.Name
+	tableID := strings.TrimSuffix(filepath.Base(file.Name), filepath.Ext(file.Name))
 
-	externalConfig := &bigquery.ExternalDataConfig{
-		SourceFormat: bigquery.DataFormat(strings.ToUpper(filepath.Ext(fileName)[1:])),
-		SourceURIs:   []string{gcsFilePath},
+	externalTable := &bigquery.TableMetadata{
+		ExternalDataConfig: &bigquery.ExternalDataConfig{
+			SourceFormat: bigquery.DataFormat(strings.ToUpper(filepath.Ext(file.Name)[1:])),
+			SourceURIs:   []string{gcsFilePath},
+		},
 	}
 
-	tableRef := bigqueryClient.Dataset(config.GCS.Dataset).Table(tableID)
-	if err := tableRef.Create(ctx, &bigquery.TableMetadata{
-		ExternalDataConfig: externalConfig,
-	}); err != nil {
+	if err := bigqueryClient.Dataset(config.GCS.Dataset).Table(tableID).Create(ctx, externalTable); err != nil {
 		log.Fatalf("Failed to create external table in BigQuery: %v", err)
 	}
 
