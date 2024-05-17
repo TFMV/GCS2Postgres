@@ -17,20 +17,16 @@ func main() {
 	ctx := context.Background()
 
 	log.Println("Starting application...")
-	log.Println("Starting LoadConfig...")
 	config, err := db.LoadConfig("../config.yaml")
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
-	log.Println("Completed LoadConfig.")
 	log.Println("Loaded configuration.")
 
-	log.Println("Starting FetchSecret...")
 	password, err := db.FetchSecret(ctx, config.Postgres.SecretName)
 	if err != nil {
 		log.Fatalf("Failed to fetch secret: %v", err)
 	}
-	log.Println("Completed FetchSecret.")
 	log.Println("Fetched secret.")
 
 	postgresURL := "postgresql://" + config.Postgres.User + ":" + password + "@" + config.Postgres.Host + "/" + config.Postgres.DBName
@@ -55,7 +51,7 @@ func main() {
 
 	for _, file := range config.GCS.Files {
 		wg.Add(1)
-		dataChan := make(chan []bigquery.Value)
+		dataChan := make(chan []bigquery.Value, 10) // Increase the buffer size
 		if err := sem.Acquire(ctx, 1); err != nil {
 			log.Fatalf("Failed to acquire semaphore: %v", err)
 		}
