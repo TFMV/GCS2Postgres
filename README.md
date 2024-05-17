@@ -26,16 +26,17 @@ postgres:
   user: "postgres"
   dbname: "tfmv"
   sslmode: "disable"
-  secret_name: "projects/{project_id}/secrets/your_secret_name/versions/latest"
+  secret_name: "projects/your_project_number/secrets/your_secret_name/versions/latest"
 
 gcs:
   bucket_name: "your_bucket_name"
   project_id: "your_gcp_project_id"
   dataset: "your_bigquery_dataset"
   files:
-    - "path/to/file1.csv"
-    - "path/to/file2.csv"
-    - "path/to/file3.json"
+    - name: "regions.parquet"
+      table: "regions"
+    - name: "cities.parquet"
+      table: "cities"
   concurrent_jobs: 3
 ```
 
@@ -44,6 +45,7 @@ gcs:
 1. **Set up the YAML configuration file** with the necessary details, including PostgreSQL connection settings and GCS details.
 2. **Ensure the necessary permissions** are granted for accessing GCS, BigQuery, and Google Secret Manager.
 3. **Build the project** using the Go build tool:
+
 ```bash
 go build -o GCS2Postgres
 ./GCS2Postgres
