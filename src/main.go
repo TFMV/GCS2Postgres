@@ -60,13 +60,13 @@ func main() {
 			defer wg.Done()
 			log.Printf("Processing file: %s", file.Name)
 			log.Printf("Starting DataProducer for file: %s...", file.Name)
-			go db.DataProducer(ctx, bigqueryClient, config, file, dataChan)
-			columns, err := db.FetchColumns(ctx, pool, file.Table)
+			db.DataProducer(ctx, bigqueryClient, config, file, dataChan)
+			columnTypes, columns, err := db.FetchColumns(ctx, pool, file.Table)
 			if err != nil {
 				log.Fatalf("Failed to fetch columns: %v", err)
 			}
 			log.Printf("Starting DataConsumer for table: %s...", file.Table)
-			db.DataConsumer(ctx, pool, file.Table, columns, dataChan)
+			db.DataConsumer(ctx, pool, file.Table, columnTypes, columns, dataChan)
 		}(file)
 	}
 
