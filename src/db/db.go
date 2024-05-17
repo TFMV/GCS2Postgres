@@ -5,6 +5,7 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"os"
 
@@ -43,6 +44,7 @@ type File struct {
 
 // LoadConfig loads configuration from a YAML file
 func LoadConfig(filename string) (*Config, error) {
+	log.Println("Starting LoadConfig...")
 	file, err := os.Open(filename)
 	if err != nil {
 		return nil, err
@@ -54,12 +56,13 @@ func LoadConfig(filename string) (*Config, error) {
 	if err := decoder.Decode(&config); err != nil {
 		return nil, err
 	}
-
+	log.Println("Completed LoadConfig.")
 	return &config, nil
 }
 
 // FetchSecret retrieves the secret value from Google Secret Manager
 func FetchSecret(ctx context.Context, secretName string) (string, error) {
+	log.Println("Starting FetchSecret...")
 	client, err := secretmanager.NewClient(ctx)
 	if err != nil {
 		return "", err
@@ -73,12 +76,13 @@ func FetchSecret(ctx context.Context, secretName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
+	log.Println("Completed FetchSecret.")
 	return string(result.Payload.Data), nil
 }
 
 // FetchColumns fetches column names for the given table from the source database.
 func FetchColumns(ctx context.Context, pool *pgxpool.Pool, tableName string) ([]string, error) {
+	log.Println("Starting FetchColumns...")
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return nil, err
@@ -99,13 +103,14 @@ func FetchColumns(ctx context.Context, pool *pgxpool.Pool, tableName string) ([]
 		}
 		columns = append(columns, column)
 	}
-
+	log.Println("Completed FetchColumns.")
 	return columns, nil
 }
 
 // DataProducer creates an external table in BigQuery and fetches data.
 func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *Config, file File, dataChan chan<- []bigquery.Value) {
 	defer close(dataChan)
+	log.Printf("Starting DataProducer for file: %s...", file.Name)
 
 	// Create an external table in BigQuery for the specified file
 	gcsFilePath := "gs://" + config.GCS.BucketName + "/" + file.Name
@@ -133,6 +138,21 @@ func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *
 
 	log.Printf("Running query for table: %s", tableID)
 	query := bigqueryClient.Query("SELECT * FROM `" + config.GCS.Dataset + "." + tableID + "`")
+	job, err := query.Run(ctx)
+	if err != nil {
+		log.Fatalf("Failed to run query: %v", err)
+	}
+
+	log.Println("Waiting for query job to complete...")
+	status, err := job.Wait(ctx)
+	if err != nil {
+		log.Fatalf("Failed to wait for job completion: %v", err)
+	}
+	if err := status.Err(); err != nil {
+		log.Fatalf("Query job completed with error: %v", err)
+	}
+
+	log.Printf("Reading rows from table: %s", tableID)
 	it, err := query.Read(ctx)
 	if err != nil {
 		log.Fatalf("Failed to read from BigQuery: %v", err)
@@ -148,13 +168,19 @@ func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *
 			log.Fatalf("Failed to read row from BigQuery: %v", err)
 		}
 		log.Printf("Read row: %v", row)
-		dataChan <- row
+		select {
+		case dataChan <- row:
+			log.Printf("Sent row to dataChan: %v", row)
+		case <-time.After(5 * time.Second):
+			log.Println("Timeout while sending row to dataChan")
+		}
 	}
 	log.Printf("Finished reading data for file: %s", file.Name)
 }
 
 // DataConsumer receives data from a channel and writes it to the target database.
 func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, columns []string, dataChan <-chan []bigquery.Value) {
+	log.Printf("Starting DataConsumer for table: %s...", tableName)
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		log.Fatalf("Failed to acquire connection from pool: %v", err)
@@ -168,7 +194,6 @@ func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, col
 			rowInterface[i] = v
 		}
 		rows = append(rows, rowInterface)
-		log.Printf("Appending row: %v", rowInterface)
 	}
 
 	copyCount, err := conn.CopyFrom(
@@ -181,4 +206,5 @@ func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, col
 		log.Fatalf("Failed to copy data to target database: %v", err)
 	}
 	log.Printf("Copied %d rows to target database from table %s.", copyCount, tableName)
+	log.Printf("Completed DataConsumer for table: %s.", tableName)
 }
