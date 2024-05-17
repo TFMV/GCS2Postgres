@@ -52,20 +52,20 @@ func main() {
 	for _, file := range config.GCS.Files {
 		wg.Add(1)
 		dataChan := make(chan []bigquery.Value, 10000)
+		if err := sem.Acquire(ctx, 1); err != nil {
+			log.Fatalf("Failed to acquire semaphore: %v", err)
+		}
 		go func(file db.File) {
-			defer wg.Done()
-			if err := sem.Acquire(ctx, 1); err != nil {
-				log.Fatalf("Failed to acquire semaphore: %v", err)
-			}
 			defer sem.Release(1)
-
+			defer wg.Done()
 			log.Printf("Processing file: %s", file.Name)
-			db.DataProducer(ctx, bigqueryClient, config, file, dataChan)
-
+			log.Printf("Starting DataProducer for file: %s...", file.Name)
+			go db.DataProducer(ctx, bigqueryClient, config, file, dataChan)
 			columns, err := db.FetchColumns(ctx, pool, file.Table)
 			if err != nil {
 				log.Fatalf("Failed to fetch columns: %v", err)
 			}
+			log.Printf("Starting DataConsumer for table: %s...", file.Table)
 			db.DataConsumer(ctx, pool, file.Table, columns, dataChan)
 		}(file)
 	}
