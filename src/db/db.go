@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"path/filepath"
 	"strings"
@@ -79,31 +80,33 @@ func FetchSecret(ctx context.Context, secretName string) (string, error) {
 	return string(result.Payload.Data), nil
 }
 
-// FetchColumns fetches column names for the given table from the source database.
-func FetchColumns(ctx context.Context, pool *pgxpool.Pool, tableName string) ([]string, error) {
+// FetchColumns fetches column names and types for the given table from the source database.
+func FetchColumns(ctx context.Context, pool *pgxpool.Pool, tableName string) (map[string]string, []string, error) {
 	log.Println("Starting FetchColumns...")
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer conn.Release()
 
-	rows, err := conn.Query(ctx, "SELECT column_name FROM information_schema.columns WHERE table_name=$1", tableName)
+	rows, err := conn.Query(ctx, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name=$1", tableName)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
+	columnTypes := make(map[string]string)
 	var columns []string
 	for rows.Next() {
-		var column string
-		if err := rows.Scan(&column); err != nil {
-			return nil, err
+		var columnName, dataType string
+		if err := rows.Scan(&columnName, &dataType); err != nil {
+			return nil, nil, err
 		}
-		columns = append(columns, column)
+		columnTypes[columnName] = dataType
+		columns = append(columns, columnName)
 	}
 	log.Println("Completed FetchColumns.")
-	return columns, nil
+	return columnTypes, columns, nil
 }
 
 // DataProducer creates an external table in BigQuery and fetches data.
@@ -166,19 +169,14 @@ func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *
 		if err != nil {
 			log.Fatalf("Failed to read row from BigQuery: %v", err)
 		}
-		select {
-		case dataChan <- row:
-			log.Printf("Sent row to dataChan: %v", row)
-		case <-ctx.Done():
-			log.Println("Context done, stopping DataProducer.")
-			return
-		}
+		log.Printf("Row: %v", row)
+		dataChan <- row
 	}
 	log.Printf("Finished reading data for file: %s", file.Name)
 }
 
 // DataConsumer receives data from a channel and writes it to the target database.
-func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, columns []string, dataChan <-chan []bigquery.Value) {
+func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, columnTypes map[string]string, columns []string, dataChan <-chan []bigquery.Value) {
 	log.Printf("Starting DataConsumer for table: %s...", tableName)
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
@@ -190,19 +188,16 @@ func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, col
 	for row := range dataChan {
 		rowInterface := make([]interface{}, len(row))
 		for i, v := range row {
-			switch v := v.(type) {
-			case int64:
-				rowInterface[i] = int32(v) // Convert int64 to int32
-			case float64:
-				rowInterface[i] = float32(v) // Convert float64 to float32
-			case string:
-				rowInterface[i] = v
-			default:
-				rowInterface[i] = v
+			columnName := columns[i]
+			dataType := columnTypes[columnName]
+			convertedValue, err := convertValue(v, dataType)
+			if err != nil {
+				log.Printf("Unexpected data type for column %s: %v", columnName, v)
+				continue
 			}
+			rowInterface[i] = convertedValue
 		}
 		rows = append(rows, rowInterface)
-		log.Printf("Row: %v", rowInterface)
 	}
 
 	copyCount, err := conn.CopyFrom(
@@ -216,4 +211,29 @@ func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, col
 	}
 	log.Printf("Copied %d rows to target database from table %s.", copyCount, tableName)
 	log.Printf("Completed DataConsumer for table: %s.", tableName)
+}
+
+func convertValue(value bigquery.Value, dataType string) (interface{}, error) {
+	if value == nil {
+		return nil, nil
+	}
+
+	switch dataType {
+	case "text", "varchar":
+		if str, ok := value.(string); ok {
+			return str, nil
+		}
+	case "int4", "integer":
+		if num, ok := value.(int64); ok {
+			return int32(num), nil
+		}
+	case "float8", "double precision":
+		if num, ok := value.(float64); ok {
+			return num, nil
+		}
+	// Add more cases as needed for other data types
+	default:
+		return value, fmt.Errorf("unsupported data type: %s", dataType)
+	}
+	return nil, fmt.Errorf("cannot convert value: %v to type: %s", value, dataType)
 }
