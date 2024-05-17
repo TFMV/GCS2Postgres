@@ -35,7 +35,7 @@ gcs:
   files:
     - name: "regions.parquet"
       table: "regions"
-    - name: "cities.parquet"
+    - name: "cities.avro"
       table: "cities"
   concurrent_jobs: 3
 ```
