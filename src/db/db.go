@@ -171,7 +171,7 @@ func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *
 		select {
 		case dataChan <- row:
 			log.Printf("Sent row to dataChan: %v", row)
-		case <-time.After(5 * time.Second):
+		case <-time.After(2 * time.Second):
 			log.Println("Timeout while sending row to dataChan")
 		}
 	}
