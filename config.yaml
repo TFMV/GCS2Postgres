@@ -7,9 +7,9 @@ postgres:
   secret_name: "projects/{project_id}/secrets/your_secret_name/versions/latest"
 
 gcs:
-  bucket_name: "your_bucket_name"
-  project_id: "your_gcp_project_id"
-  dataset: "your_bigquery_dataset"
+  bucket_name: "tfmv-gcs-to-pg"
+  project_id: "tfmv-371720"
+  dataset: "tfmv"
   files:
     - "path/to/file1.csv"
     - "path/to/file2.csv"
