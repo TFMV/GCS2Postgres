@@ -8,38 +8,14 @@ import (
 	"strings"
 
 	"cloud.google.com/go/bigquery"
-	_ "github.com/TFMV/GCS2Postgres/src/utils"
+	"github.com/TFMV/GCS2Postgres/src/utils"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/api/iterator"
 )
 
-// Config represents the YAML configuration structure
-type Config struct {
-	Postgres struct {
-		Host       string `yaml:"host"`
-		Port       int    `yaml:"port"`
-		User       string `yaml:"user"`
-		DBName     string `yaml:"dbname"`
-		SSLMode    string `yaml:"sslmode"`
-		SecretName string `yaml:"secret_name"`
-	} `yaml:"postgres"`
-	GCS struct {
-		BucketName     string `yaml:"bucket_name"`
-		ProjectID      string `yaml:"project_id"`
-		Dataset        string `yaml:"dataset"`
-		Files          []File `yaml:"files"`
-		ConcurrentJobs int    `yaml:"concurrent_jobs"`
-	} `yaml:"gcs"`
-}
-
-type File struct {
-	Name  string `yaml:"name"`
-	Table string `yaml:"table"`
-}
-
 // DataProducer creates an external table in BigQuery and fetches data.
-func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *Config, file File, dataChan chan<- []bigquery.Value, schemaChan chan bigquery.Schema) {
+func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *utils.Config, file utils.File, dataChan chan<- []bigquery.Value, schemaChan chan bigquery.Schema) {
 	defer close(dataChan)
 	log.Printf("Starting DataProducer for file: %s...", file.Name)
 
@@ -127,13 +103,13 @@ func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, col
 	for row := range dataChan {
 		rowInterface := make([]interface{}, len(columns))
 		for i, colName := range columns {
-			idx := getIndex(schema, colName)
+			idx := utils.GetIndex(schema, colName)
 			if idx == -1 {
 				log.Printf("Column %s not found in BigQuery schema", colName)
 				rowInterface[i] = nil
 				continue
 			}
-			rowInterface[i] = convertValue(row[idx], columnTypes[colName])
+			rowInterface[i] = utils.ConvertValue(row[idx], columnTypes[colName])
 		}
 		rows = append(rows, rowInterface)
 	}
@@ -152,14 +128,14 @@ func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, col
 }
 
 // TransferData orchestrates the data transfer from GCS to PostgreSQL.
-func TransferData(ctx context.Context, config *Config, pool *pgxpool.Pool, bigqueryClient *bigquery.Client) {
+func TransferData(ctx context.Context, config *utils.Config, pool *pgxpool.Pool, bigqueryClient *bigquery.Client) {
 	log.Println("Starting data transfer...")
 
 	for _, file := range config.GCS.Files {
 		dataChan := make(chan []bigquery.Value, config.GCS.ConcurrentJobs)
 		schemaChan := make(chan bigquery.Schema, 1)
 
-		columnTypes, columns, err := FetchColumns(ctx, pool, file.Table)
+		columnTypes, columns, err := utils.FetchColumns(ctx, pool, file.Table)
 		if err != nil {
 			log.Fatalf("Failed to fetch columns: %v", err)
 		}
