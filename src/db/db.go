@@ -15,8 +15,9 @@ import (
 )
 
 // DataProducer creates an external table in BigQuery and fetches data.
-func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *utils.Config, file utils.File, dataChan chan<- []bigquery.Value, schemaChan chan bigquery.Schema) {
+func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *utils.Config, file utils.File, dataChan chan<- []bigquery.Value, schemaChan chan<- bigquery.Schema) {
 	defer close(dataChan)
+	defer close(schemaChan)
 	log.Printf("Starting DataProducer for file: %s...", file.Name)
 
 	// Create an external table in BigQuery for the specified file
@@ -33,15 +34,28 @@ func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *
 	log.Printf("Creating external table: %s", tableID)
 
 	// Check if the table already exists
-	_, err := bigqueryClient.Dataset(config.GCS.Dataset).Table(tableID).Metadata(ctx)
-	if err == nil {
-		log.Printf("Table %s already exists, skipping creation.", tableID)
-	} else {
-		log.Printf("Creating new table %s.", tableID)
-		if err := bigqueryClient.Dataset(config.GCS.Dataset).Table(tableID).Create(ctx, externalTable); err != nil {
+	table := bigqueryClient.Dataset(config.GCS.Dataset).Table(tableID)
+	meta, err := table.Metadata(ctx)
+	if err != nil {
+		log.Printf("Table %s does not exist, creating new table.", tableID)
+		if err := table.Create(ctx, externalTable); err != nil {
 			log.Fatalf("Failed to create external table in BigQuery: %v", err)
 		}
+		meta, err = table.Metadata(ctx)
+		if err != nil {
+			log.Fatalf("Failed to get metadata for table %s: %v", tableID, err)
+		}
+	} else {
+		log.Printf("Table %s already exists, skipping creation.", tableID)
 	}
+
+	log.Println("Fetching schema from external table")
+	schema := meta.Schema
+	log.Println("BigQuery Table Schema:")
+	for _, field := range schema {
+		log.Printf("Field Name: %s, Field Type: %s", field.Name, field.Type)
+	}
+	schemaChan <- schema
 
 	log.Printf("Running query for table: %s", tableID)
 	query := bigqueryClient.Query("SELECT * FROM `" + config.GCS.Dataset + "." + tableID + "`")
@@ -64,13 +78,6 @@ func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *
 	if err != nil {
 		log.Fatalf("Failed to read from BigQuery: %v", err)
 	}
-
-	// Log BigQuery table schema
-	log.Println("BigQuery Table Schema:")
-	for _, field := range it.Schema {
-		log.Printf("Field Name: %s, Field Type: %s", field.Name, field.Type)
-	}
-	schemaChan <- it.Schema
 
 	for {
 		var row []bigquery.Value
@@ -97,7 +104,10 @@ func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, col
 	defer conn.Release()
 
 	schema := <-schemaChan
-	log.Printf("BigQuery Schema: %v", schema)
+	log.Println("BigQuery Schema:")
+	for _, field := range schema {
+		log.Printf("Field Name: %s, Field Type: %s", field.Name, field.Type)
+	}
 
 	rows := make([][]interface{}, 0)
 	for row := range dataChan {
