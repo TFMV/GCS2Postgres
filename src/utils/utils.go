@@ -1,4 +1,4 @@
-package db
+package utils
 
 import (
 	"context"
@@ -113,7 +113,7 @@ func FetchColumns(ctx context.Context, pool *pgxpool.Pool, tableName string) (ma
 }
 
 // getIndex returns the index of a column name in the BigQuery schema
-func getIndex(schema bigquery.Schema, colName string) int {
+func GetIndex(schema bigquery.Schema, colName string) int {
 	for i, field := range schema {
 		if strings.ToLower(field.Name) == strings.ToLower(colName) {
 			return i
@@ -122,8 +122,8 @@ func getIndex(schema bigquery.Schema, colName string) int {
 	return -1
 }
 
-// convertValue converts BigQuery values to PostgreSQL compatible values
-func convertValue(value bigquery.Value, dataType string) interface{} {
+// convertValue converts BigQuery values to appropriate PostgreSQL types
+func ConvertValue(value bigquery.Value, dataType string) interface{} {
 	if value == nil {
 		return nil
 	}
