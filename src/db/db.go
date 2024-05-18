@@ -7,15 +7,11 @@ import (
 	"path/filepath"
 	"strings"
 
-	"os"
-
 	"cloud.google.com/go/bigquery"
-	secretmanager "cloud.google.com/go/secretmanager/apiv1"
-	secretmanagerpb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	_ "github.com/TFMV/GCS2Postgres/src/utils"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/api/iterator"
-	"gopkg.in/yaml.v3"
 )
 
 // Config represents the YAML configuration structure
@@ -42,75 +38,8 @@ type File struct {
 	Table string `yaml:"table"`
 }
 
-// LoadConfig loads configuration from a YAML file
-func LoadConfig(filename string) (*Config, error) {
-	log.Println("Starting LoadConfig...")
-	file, err := os.Open(filename)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var config Config
-	decoder := yaml.NewDecoder(file)
-	if err := decoder.Decode(&config); err != nil {
-		return nil, err
-	}
-	log.Println("Completed LoadConfig.")
-	return &config, nil
-}
-
-// FetchSecret retrieves the secret value from Google Secret Manager
-func FetchSecret(ctx context.Context, secretName string) (string, error) {
-	log.Println("Starting FetchSecret...")
-	client, err := secretmanager.NewClient(ctx)
-	if err != nil {
-		return "", err
-	}
-	defer client.Close()
-
-	req := &secretmanagerpb.AccessSecretVersionRequest{
-		Name: secretName,
-	}
-	result, err := client.AccessSecretVersion(ctx, req)
-	if err != nil {
-		return "", err
-	}
-	log.Println("Completed FetchSecret.")
-	return string(result.Payload.Data), nil
-}
-
-// FetchColumns fetches column names and types for the given table from the source database.
-func FetchColumns(ctx context.Context, pool *pgxpool.Pool, tableName string) (map[string]string, []string, error) {
-	log.Println("Starting FetchColumns...")
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer conn.Release()
-
-	rows, err := conn.Query(ctx, "SELECT column_name, data_type FROM information_schema.columns WHERE table_name=$1", tableName)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer rows.Close()
-
-	columnTypes := make(map[string]string)
-	var columns []string
-	for rows.Next() {
-		var columnName, dataType string
-		if err := rows.Scan(&columnName, &dataType); err != nil {
-			return nil, nil, err
-		}
-		columnTypes[columnName] = dataType
-		columns = append(columns, columnName)
-	}
-	log.Println("Completed FetchColumns.")
-	return columnTypes, columns, nil
-}
-
 // DataProducer creates an external table in BigQuery and fetches data.
-func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *Config, file File, dataChan chan<- []bigquery.Value) {
+func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *Config, file File, dataChan chan<- []bigquery.Value, schemaChan chan bigquery.Schema) {
 	defer close(dataChan)
 	log.Printf("Starting DataProducer for file: %s...", file.Name)
 
@@ -160,6 +89,13 @@ func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *
 		log.Fatalf("Failed to read from BigQuery: %v", err)
 	}
 
+	// Log BigQuery table schema
+	log.Println("BigQuery Table Schema:")
+	for _, field := range it.Schema {
+		log.Printf("Field Name: %s, Field Type: %s", field.Name, field.Type)
+	}
+	schemaChan <- it.Schema
+
 	for {
 		var row []bigquery.Value
 		err := it.Next(&row)
@@ -176,7 +112,7 @@ func DataProducer(ctx context.Context, bigqueryClient *bigquery.Client, config *
 }
 
 // DataConsumer receives data from a channel and writes it to the target database.
-func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, columnTypes map[string]string, columns []string, dataChan <-chan []bigquery.Value) {
+func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, columnTypes map[string]string, columns []string, dataChan <-chan []bigquery.Value, schemaChan <-chan bigquery.Schema) {
 	log.Printf("Starting DataConsumer for table: %s...", tableName)
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
@@ -184,18 +120,20 @@ func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, col
 	}
 	defer conn.Release()
 
+	schema := <-schemaChan
+	log.Printf("BigQuery Schema: %v", schema)
+
 	rows := make([][]interface{}, 0)
 	for row := range dataChan {
-		rowInterface := make([]interface{}, len(row))
-		for i, v := range row {
-			columnName := columns[i]
-			dataType := columnTypes[columnName]
-			convertedValue, err := convertValue(v, dataType)
-			if err != nil {
-				log.Printf("Unexpected data type for column %s: %v", columnName, v)
+		rowInterface := make([]interface{}, len(columns))
+		for i, colName := range columns {
+			idx := getIndex(schema, colName)
+			if idx == -1 {
+				log.Printf("Column %s not found in BigQuery schema", colName)
+				rowInterface[i] = nil
 				continue
 			}
-			rowInterface[i] = convertedValue
+			rowInterface[i] = convertValue(row[idx], columnTypes[colName])
 		}
 		rows = append(rows, rowInterface)
 	}
@@ -213,27 +151,42 @@ func DataConsumer(ctx context.Context, pool *pgxpool.Pool, tableName string, col
 	log.Printf("Completed DataConsumer for table: %s.", tableName)
 }
 
-func convertValue(value bigquery.Value, dataType string) (interface{}, error) {
-	if value == nil {
-		return nil, nil
+// TransferData orchestrates the data transfer from GCS to PostgreSQL.
+func TransferData(ctx context.Context, config *Config, pool *pgxpool.Pool, bigqueryClient *bigquery.Client) {
+	log.Println("Starting data transfer...")
+
+	for _, file := range config.GCS.Files {
+		dataChan := make(chan []bigquery.Value, config.GCS.ConcurrentJobs)
+		schemaChan := make(chan bigquery.Schema, 1)
+
+		columnTypes, columns, err := FetchColumns(ctx, pool, file.Table)
+		if err != nil {
+			log.Fatalf("Failed to fetch columns: %v", err)
+		}
+
+		go DataProducer(ctx, bigqueryClient, config, file, dataChan, schemaChan)
+		DataConsumer(ctx, pool, file.Table, columnTypes, columns, dataChan, schemaChan)
 	}
 
-	switch dataType {
-	case "text", "varchar":
-		if str, ok := value.(string); ok {
-			return str, nil
-		}
-	case "int4", "integer":
-		if num, ok := value.(int64); ok {
-			return int32(num), nil
-		}
-	case "float8", "double precision":
-		if num, ok := value.(float64); ok {
-			return num, nil
-		}
-	// Add more cases as needed for other data types
-	default:
-		return value, fmt.Errorf("unsupported data type: %s", dataType)
+	log.Println("Data transfer completed.")
+}
+
+// InitializeBigQueryClient initializes a BigQuery client.
+func InitializeBigQueryClient(ctx context.Context, projectID string) (*bigquery.Client, error) {
+	return bigquery.NewClient(ctx, projectID)
+}
+
+// InitializePostgresPool initializes a PostgreSQL connection pool.
+func InitializePostgresPool(ctx context.Context, connString string) (*pgxpool.Pool, error) {
+	config, err := pgxpool.ParseConfig(connString)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse connection string: %v", err)
 	}
-	return nil, fmt.Errorf("cannot convert value: %v to type: %s", value, dataType)
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create connection pool: %v", err)
+	}
+
+	return pool, nil
 }
