@@ -2,7 +2,7 @@
 
 ## Overview
 
-GCS2Postgres is a Go-based solution designed to facilitate the loading of various open data formats stored in Google Cloud Storage (GCS) into a PostgreSQL database. This solution leverages Google BigQuery for data extraction and transformation, providing a seamless and scalable data pipeline.
+GCS2Postgres is a Go-based solution designed to facilitate the loading of various open data formats stored in Google Cloud Storage (GCS) and BigQuery into a PostgreSQL database. This solution leverages Google BigQuery for data extraction and transformation, providing a seamless and scalable data pipeline.
 
 ![GCS2Postgres](assets/GCS2Postgres.webp)
 
@@ -38,6 +38,14 @@ gcs:
     - name: "cities.avro"
       table: "cities"
   concurrent_jobs: 3
+
+bq:
+  project_id: "your_gcp_project_id"
+  dataset: "your_bigquery_dataset"
+  tables:
+    - name: "nation"
+      table: "nation"
+
 ```
 
 ## Usage
