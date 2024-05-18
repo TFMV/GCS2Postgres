@@ -31,9 +31,19 @@ type Config struct {
 		Files          []File `yaml:"files"`
 		ConcurrentJobs int    `yaml:"concurrent_jobs"`
 	} `yaml:"gcs"`
+	BQ struct {
+		ProjectID string  `yaml:"project_id"`
+		Dataset   string  `yaml:"dataset"`
+		Tables    []Table `yaml:"tables"`
+	} `yaml:"bq"`
 }
 
 type File struct {
+	Name  string `yaml:"name"`
+	Table string `yaml:"table"`
+}
+
+type Table struct {
 	Name  string `yaml:"name"`
 	Table string `yaml:"table"`
 }
@@ -141,8 +151,16 @@ func ConvertValue(value bigquery.Value, dataType string) interface{} {
 		if num, ok := value.(float64); ok {
 			return num
 		}
+	case "boolean":
+		if boolVal, ok := value.(bool); ok {
+			return boolVal
+		}
+	case "date", "timestamp":
+		if str, ok := value.(string); ok {
+			return str
+		}
 	default:
-		return value
+		return fmt.Sprintf("%v", value)
 	}
 	return value
 }

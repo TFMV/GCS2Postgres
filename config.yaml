@@ -16,3 +16,10 @@ gcs:
     - name: "supplier.avro"
       table: "supplier"
   concurrent_jobs: 1
+
+bq:
+  project_id: "tfmv-371720"
+  dataset: "tpch"
+  tables:
+    - name: "nation"
+      table: "nation"
