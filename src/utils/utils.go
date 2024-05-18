@@ -112,17 +112,17 @@ func FetchColumns(ctx context.Context, pool *pgxpool.Pool, tableName string) (ma
 	return columnTypes, columns, nil
 }
 
-// getIndex returns the index of a column name in the BigQuery schema
+// GetIndex returns the index of a column name in the BigQuery schema
 func GetIndex(schema bigquery.Schema, colName string) int {
 	for i, field := range schema {
-		if strings.ToLower(field.Name) == strings.ToLower(colName) {
+		if strings.EqualFold(field.Name, colName) {
 			return i
 		}
 	}
 	return -1
 }
 
-// convertValue converts BigQuery values to appropriate PostgreSQL types
+// ConvertValue converts a BigQuery value to a PostgreSQL compatible value
 func ConvertValue(value bigquery.Value, dataType string) interface{} {
 	if value == nil {
 		return nil
@@ -145,4 +145,24 @@ func ConvertValue(value bigquery.Value, dataType string) interface{} {
 		return value
 	}
 	return value
+}
+
+// InitializeBigQueryClient initializes a BigQuery client.
+func InitializeBigQueryClient(ctx context.Context, projectID string) (*bigquery.Client, error) {
+	return bigquery.NewClient(ctx, projectID)
+}
+
+// InitializePostgresPool initializes a PostgreSQL connection pool.
+func InitializePostgresPool(ctx context.Context, connString string) (*pgxpool.Pool, error) {
+	config, err := pgxpool.ParseConfig(connString)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse connection string: %v", err)
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create connection pool: %v", err)
+	}
+
+	return pool, nil
 }
