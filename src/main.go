@@ -11,28 +11,34 @@ import (
 func main() {
 	ctx := context.Background()
 
+	// Load the configuration
 	config, err := utils.LoadConfig("../config.yaml")
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	// Fetch the secret (password)
 	secret, err := utils.FetchSecret(ctx, config.Postgres.SecretName)
 	if err != nil {
 		log.Fatalf("Failed to fetch secret: %v", err)
 	}
 
+	// Build the connection string
 	connString := utils.BuildConnString(config, secret)
-	pool, err := utils.InitializePostgresPool(ctx, connString)
+
+	// Initialize PostgreSQL connection pool
+	pool, err := db.InitializePostgresPool(ctx, connString)
 	if err != nil {
-		log.Fatalf("Failed to initialize Postgres pool: %v", err)
+		log.Fatalf("Failed to initialize PostgreSQL pool: %v", err)
 	}
 	defer pool.Close()
 
-	bigqueryClient, err := utils.InitializeBigQueryClient(ctx, config.GCS.ProjectID)
+	// Initialize BigQuery client
+	bigqueryClient, err := db.InitializeBigQueryClient(ctx, config.GCS.ProjectID)
 	if err != nil {
 		log.Fatalf("Failed to initialize BigQuery client: %v", err)
 	}
-	defer bigqueryClient.Close()
 
+	// Transfer data
 	db.TransferData(ctx, config, pool, bigqueryClient)
 }
